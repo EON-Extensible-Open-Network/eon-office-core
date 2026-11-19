@@ -3,7 +3,7 @@
 
 [package]
 name = "eon-office-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.98"
 license = "GPL-3.0-or-later"
@@ -14,10 +14,6 @@ publish = false
 [lib]
 name = "eon_office_core"
 path = "src/lib.rs"
-
-[[bin]]
-name = "eon-office-core"
-path = "src/main.rs"
 
 # Every dependency is a supply-chain commitment (madde 37); each says why it is here.
 # The transport is the standard library's TCP and threads: no HTTP stack, no async

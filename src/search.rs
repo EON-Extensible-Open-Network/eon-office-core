@@ -78,7 +78,7 @@ pub fn index(
         *weights.entry(term).or_default() += 1;
     }
     let snippet: String = text.chars().take(SNIPPET_CHARS).collect();
-    let tx = conn.unchecked_transaction()?;
+    let tx = crate::db::immediate(conn)?;
     tx.execute(
         "DELETE FROM search_terms WHERE app = ?1 AND id = ?2",
         params![app, id],
@@ -102,14 +102,17 @@ pub fn index(
 }
 
 pub fn remove(conn: &Connection, app: &str, id: &str) -> Result<bool> {
-    conn.execute(
+    let tx = crate::db::immediate(conn)?;
+    tx.execute(
         "DELETE FROM search_terms WHERE app = ?1 AND id = ?2",
         params![app, id],
     )?;
-    Ok(conn.execute(
+    let removed = tx.execute(
         "DELETE FROM search_docs WHERE app = ?1 AND id = ?2",
         params![app, id],
-    )? > 0)
+    )? > 0;
+    tx.commit()?;
+    Ok(removed)
 }
 
 pub fn forget_app(conn: &Connection, app: &str) -> Result<()> {
@@ -196,11 +199,11 @@ pub fn query(conn: &Connection, viewer: Option<&str>, query: &str, limit: i64) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::{open_in_memory, Schema};
 
     #[test]
     fn turkish_text_is_found_however_it_is_typed() -> Result<()> {
-        let conn = open_in_memory()?;
+        let conn = open_in_memory(Schema::Shared)?;
         index(
             &conn,
             "org.a.notes",
@@ -219,7 +222,7 @@ mod tests {
 
     #[test]
     fn private_entries_stay_with_their_application() -> Result<()> {
-        let conn = open_in_memory()?;
+        let conn = open_in_memory(Schema::Shared)?;
         index(
             &conn,
             "org.a.notes",
@@ -250,7 +253,7 @@ mod tests {
 
     #[test]
     fn every_term_must_match_and_titles_rank_first() -> Result<()> {
-        let conn = open_in_memory()?;
+        let conn = open_in_memory(Schema::Shared)?;
         index(
             &conn,
             "org.a.notes",
@@ -291,7 +294,7 @@ mod tests {
 
     #[test]
     fn reindexing_replaces_and_removing_removes() -> Result<()> {
-        let conn = open_in_memory()?;
+        let conn = open_in_memory(Schema::Shared)?;
         index(
             &conn,
             "org.a.notes",

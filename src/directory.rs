@@ -448,7 +448,7 @@ pub fn snapshot(conn: &Connection) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::{open_in_memory, Schema};
 
     #[test]
     fn the_permission_table() {
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn roles_reach_down_and_the_strongest_wins() -> Result<()> {
-        let conn = open_in_memory()?;
+        let conn = open_in_memory(Schema::Shared)?;
         let owner = ensure_owner(&conn)?;
         let ada = create_user(&conn, "ada", Some("Ada"))?["id"]
             .as_str()
@@ -535,7 +535,7 @@ mod tests {
 
     #[test]
     fn user_names_are_unique_and_narrow() -> Result<()> {
-        let conn = open_in_memory()?;
+        let conn = open_in_memory(Schema::Shared)?;
         create_user(&conn, "ada", None)?;
         assert!(create_user(&conn, "ada", None).is_err());
         assert!(create_user(&conn, "Ada Lovelace", None).is_err());

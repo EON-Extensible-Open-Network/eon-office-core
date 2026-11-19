@@ -409,13 +409,13 @@ pub fn forget_app(conn: &Connection, app: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::{open_in_memory, Schema};
 
     const APP: &str = "org.example.notes";
 
     #[test]
     fn a_stale_write_is_refused_with_the_current_revision() -> Result<()> {
-        let conn = open_in_memory()?;
+        let conn = open_in_memory(Schema::Data)?;
         let mut clock = Clock::new("01".into());
         put(
             &conn,
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn deleted_documents_vanish_from_reads_but_keep_counting() -> Result<()> {
-        let conn = open_in_memory()?;
+        let conn = open_in_memory(Schema::Data)?;
         let mut clock = Clock::new("01".into());
         put(&conn, &mut clock, APP, "notes", "a", &json!({}), None)?;
         delete(&conn, &mut clock, APP, "notes", "a", None)?;
@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn two_devices_converge_and_the_loser_is_kept() -> Result<()> {
-        let (laptop, phone) = (open_in_memory()?, open_in_memory()?);
+        let (laptop, phone) = (open_in_memory(Schema::Data)?, open_in_memory(Schema::Data)?);
         let (mut lc, mut pc) = (Clock::new("0a".into()), Clock::new("0b".into()));
 
         // Both start from the same note.
@@ -539,7 +539,7 @@ mod tests {
 
     #[test]
     fn a_deletion_syncs_and_importing_twice_changes_nothing() -> Result<()> {
-        let (a, b) = (open_in_memory()?, open_in_memory()?);
+        let (a, b) = (open_in_memory(Schema::Data)?, open_in_memory(Schema::Data)?);
         let (mut ac, mut bc) = (Clock::new("0a".into()), Clock::new("0b".into()));
         put(&a, &mut ac, APP, "notes", "n", &json!({}), None)?;
         let changes = export(&a, "0a", None, 100)?;
@@ -563,7 +563,7 @@ mod tests {
 
     #[test]
     fn export_pages_by_clock_stamp() -> Result<()> {
-        let conn = open_in_memory()?;
+        let conn = open_in_memory(Schema::Data)?;
         let mut clock = Clock::new("01".into());
         for n in 0..5 {
             put(

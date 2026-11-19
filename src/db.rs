@@ -4,33 +4,113 @@
 // Additional permission under GNU GPL version 3 section 7:
 // see LICENSE-EXCEPTION.md (EON Module ABI Exception 1.0).
 
-//! The database: opening it, migrating it, backing it up, restoring it.
+//! The two database files: opening them, migrating them, backing them up,
+//! restoring them.
 //!
-//! Migrations are ordered SQL scripts, applied in one transaction each. The
-//! schema version lives in SQLite's `user_version`. A database written by a
-//! *newer* core is refused instead of opened: an older binary that does not
-//! know a table would silently drop meaning from it.
+//! `shared.sqlite` is what every EON Office application on the machine meets
+//! in; `apps/<id>/data.sqlite` is one application's documents
+//! (`eon-office-spec/docs/shared-store.md`). Each has its own schema history:
+//! ordered SQL scripts, applied in one transaction each, the version kept in
+//! SQLite's `user_version`. A file written by a *newer* EON Office is refused
+//! instead of opened: an older program that does not know a table would
+//! silently drop meaning from it.
 
 use crate::error::{Error, Kind, Result};
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 use std::time::Duration;
 
-/// Each entry upgrades the schema by one version. Never edit a released entry;
-/// append a new one.
-const MIGRATIONS: &[&str] = &[
+/// Which of the two files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Schema {
+    Shared,
+    Data,
+}
+
+impl Schema {
+    fn migrations(self) -> &'static [&'static str] {
+        match self {
+            Schema::Shared => SHARED,
+            Schema::Data => DATA,
+        }
+    }
+
+    /// The schema version this library writes.
+    #[must_use]
+    pub fn version(self) -> i64 {
+        self.migrations().len() as i64
+    }
+}
+
+/// `shared.sqlite`. Each entry upgrades the schema by one version. Never edit
+/// a released entry; append a new one.
+const SHARED: &[&str] = &[
     // 1 -- the first schema.
     r"
     CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
-    CREATE TABLE apps (
+    CREATE TABLE registry (
         id TEXT PRIMARY KEY,
         manifest TEXT NOT NULL,
         path TEXT,
-        token_hash TEXT NOT NULL,
-        granted TEXT NOT NULL DEFAULT '[]',
-        installed_at INTEGER NOT NULL,
+        revoked TEXT NOT NULL DEFAULT '[]',
+        registered_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE settings (
+        scope TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        PRIMARY KEY (scope, key)
+    );
+    CREATE TABLE themes (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+
+    CREATE TABLE search_docs (
+        app TEXT NOT NULL,
+        id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        snippet TEXT NOT NULL,
+        visibility TEXT NOT NULL,
+        workspace TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (app, id)
+    );
+    CREATE TABLE search_terms (
+        term TEXT NOT NULL,
+        app TEXT NOT NULL,
+        id TEXT NOT NULL,
+        weight INTEGER NOT NULL,
+        PRIMARY KEY (term, app, id)
+    ) WITHOUT ROWID;
+    CREATE INDEX search_terms_doc ON search_terms(app, id);
+
+    CREATE TABLE activity (
+        seq INTEGER PRIMARY KEY,
+        at INTEGER NOT NULL,
+        app TEXT NOT NULL,
+        item TEXT NOT NULL,
+        title TEXT NOT NULL,
+        kind TEXT NOT NULL
+    );
+
+    CREATE TABLE public (
+        app TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (app, key)
+    );
+
+    CREATE TABLE audit (
+        seq INTEGER PRIMARY KEY,
+        at INTEGER NOT NULL,
+        actor TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target TEXT NOT NULL,
+        detail TEXT NOT NULL,
+        prev TEXT NOT NULL,
+        hash TEXT NOT NULL
     );
 
     CREATE TABLE users (
@@ -60,6 +140,14 @@ const MIGRATIONS: &[&str] = &[
         role TEXT NOT NULL,
         PRIMARY KEY (user_id, scope_kind, scope_id)
     );
+    ",
+];
+
+/// `apps/<id>/data.sqlite`. Only that application opens it.
+const DATA: &[&str] = &[
+    // 1 -- the first schema.
+    r"
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
     CREATE TABLE docs (
         app TEXT NOT NULL,
@@ -90,64 +178,17 @@ const MIGRATIONS: &[&str] = &[
         value TEXT NOT NULL,
         PRIMARY KEY (scope, key)
     );
-    CREATE TABLE themes (id TEXT PRIMARY KEY, body TEXT NOT NULL);
-
-    CREATE TABLE notifications (
-        id INTEGER PRIMARY KEY,
-        app TEXT NOT NULL,
-        title TEXT NOT NULL,
-        body TEXT NOT NULL,
-        urgency TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        read INTEGER NOT NULL DEFAULT 0
-    );
-
-    CREATE TABLE search_docs (
-        app TEXT NOT NULL,
-        id TEXT NOT NULL,
-        title TEXT NOT NULL,
-        snippet TEXT NOT NULL,
-        visibility TEXT NOT NULL,
-        workspace TEXT,
-        updated_at INTEGER NOT NULL,
-        PRIMARY KEY (app, id)
-    );
-    CREATE TABLE search_terms (
-        term TEXT NOT NULL,
-        app TEXT NOT NULL,
-        id TEXT NOT NULL,
-        weight INTEGER NOT NULL,
-        PRIMARY KEY (term, app, id)
-    ) WITHOUT ROWID;
-    CREATE INDEX search_terms_doc ON search_terms(app, id);
-
-    CREATE TABLE jobs (
-        app TEXT NOT NULL,
-        name TEXT NOT NULL,
-        payload TEXT NOT NULL,
-        next_at INTEGER NOT NULL,
-        every_ms INTEGER,
-        created_at INTEGER NOT NULL,
-        PRIMARY KEY (app, name)
-    );
-
-    CREATE TABLE audit (
-        seq INTEGER PRIMARY KEY,
-        at INTEGER NOT NULL,
-        actor TEXT NOT NULL,
-        action TEXT NOT NULL,
-        target TEXT NOT NULL,
-        detail TEXT NOT NULL,
-        prev TEXT NOT NULL,
-        hash TEXT NOT NULL
-    );
     ",
 ];
 
-/// The schema version this binary writes.
-#[must_use]
-pub fn schema_version() -> i64 {
-    MIGRATIONS.len() as i64
+/// A transaction that takes the write lock at once. Every read-then-write in
+/// `shared.sqlite` uses one: several processes write it, and a deferred
+/// transaction that has read cannot wait for the write lock -- it fails.
+pub fn immediate(conn: &Connection) -> Result<rusqlite::Transaction<'_>> {
+    Ok(rusqlite::Transaction::new_unchecked(
+        conn,
+        rusqlite::TransactionBehavior::Immediate,
+    )?)
 }
 
 fn configure(conn: &Connection) -> Result<()> {
@@ -159,45 +200,66 @@ fn configure(conn: &Connection) -> Result<()> {
 }
 
 /// Open (creating if needed) and migrate.
-pub fn open(path: &Path) -> Result<Connection> {
+pub fn open(path: &Path, schema: Schema) -> Result<Connection> {
     let conn = Connection::open(path)?;
     configure(&conn)?;
-    migrate(&conn)?;
+    migrate(&conn, schema)?;
     Ok(conn)
 }
 
 /// A private in-memory database, migrated. For tests.
-pub fn open_in_memory() -> Result<Connection> {
+pub fn open_in_memory(schema: Schema) -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    migrate(&conn)?;
+    migrate(&conn, schema)?;
     Ok(conn)
 }
 
-fn migrate(conn: &Connection) -> Result<()> {
-    let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    let known = schema_version();
-    if current > known {
-        return Err(Error::new(
+fn user_version(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("PRAGMA user_version", [], |row| row.get(0))?)
+}
+
+fn migrate(conn: &Connection, schema: Schema) -> Result<()> {
+    let known = schema.version();
+    let refuse = |current: i64| {
+        Error::new(
             Kind::Incompatible,
             format!(
-                "this database has schema {current}, written by a newer core; this core knows {known}"
+                "this database has schema {current}, written by a newer EON Office; this one knows {known}"
             ),
-        ));
+        )
+    };
+    let current = user_version(conn)?;
+    if current > known {
+        return Err(refuse(current));
     }
-    for (index, script) in MIGRATIONS.iter().enumerate().skip(current as usize) {
-        let version = index as i64 + 1;
-        let tx = conn.unchecked_transaction()?;
+    if current == known {
+        return Ok(());
+    }
+    // Two applications starting at once may both try; the lock decides, and
+    // the second finds the work done.
+    let tx = immediate(conn)?;
+    let current = user_version(&tx)?;
+    if current > known {
+        return Err(refuse(current));
+    }
+    for (index, script) in schema
+        .migrations()
+        .iter()
+        .enumerate()
+        .skip(current as usize)
+    {
         tx.execute_batch(script)?;
-        tx.pragma_update(None, "user_version", version)?;
-        tx.commit()?;
+        tx.pragma_update(None, "user_version", index as i64 + 1)?;
     }
+    tx.commit()?;
     Ok(())
 }
 
 /// Copy the live database to `target` with SQLite's online backup, so the
-/// core does not have to stop. The copy is checked before it is reported.
-pub fn backup(conn: &Connection, target: &Path) -> Result<()> {
+/// applications do not have to stop. The copy is checked before it is
+/// reported.
+pub fn backup(conn: &Connection, target: &Path, schema: Schema) -> Result<()> {
     if target.exists() {
         return Err(Error::params(
             "the backup target already exists; refusing to overwrite it",
@@ -209,11 +271,11 @@ pub fn backup(conn: &Connection, target: &Path) -> Result<()> {
         backup.run_to_completion(256, Duration::from_millis(5), None)?;
     }
     drop(dest);
-    check(target)
+    check(target, schema)
 }
 
-/// Is `path` a sound database this core can open?
-pub fn check(path: &Path) -> Result<()> {
+/// Is `path` a sound database of this schema that this library can open?
+pub fn check(path: &Path, schema: Schema) -> Result<()> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let integrity: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     if integrity != "ok" {
@@ -222,23 +284,28 @@ pub fn check(path: &Path) -> Result<()> {
             "the backup failed its integrity check",
         ));
     }
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version > schema_version() || version == 0 {
+    let version = user_version(&conn)?;
+    if version > schema.version() || version == 0 {
         return Err(Error::new(
             Kind::Incompatible,
             format!(
-                "the backup has schema {version}; this core knows 1..={}",
-                schema_version()
+                "the backup has schema {version}; this library knows 1..={}",
+                schema.version()
             ),
         ));
     }
     Ok(())
 }
 
-/// Replace the database at `live` with `from`. The core must not be running.
+/// Replace the database at `live` with `from`. Nothing may have it open.
 /// The previous file is kept beside it, renamed, never deleted.
-pub fn restore(live: &Path, from: &Path, stamp: u64) -> Result<Option<std::path::PathBuf>> {
-    check(from)?;
+pub fn restore(
+    live: &Path,
+    from: &Path,
+    schema: Schema,
+    stamp: u64,
+) -> Result<Option<std::path::PathBuf>> {
+    check(from, schema)?;
     let mut kept = None;
     if live.exists() {
         // Fold the write-ahead log into the main file first, so the kept copy
@@ -266,19 +333,47 @@ mod tests {
 
     #[test]
     fn migrations_apply_once_and_record_the_version() -> Result<()> {
-        let conn = open_in_memory()?;
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        assert_eq!(version, schema_version());
-        migrate(&conn)?; // a second run is a no-op
+        for schema in [Schema::Shared, Schema::Data] {
+            let conn = open_in_memory(schema)?;
+            assert_eq!(user_version(&conn)?, schema.version());
+            migrate(&conn, schema)?; // a second run is a no-op
+        }
         Ok(())
     }
 
     #[test]
-    fn a_database_from_a_newer_core_is_refused() -> Result<()> {
-        let conn = open_in_memory()?;
-        conn.pragma_update(None, "user_version", schema_version() + 1)?;
-        let error = migrate(&conn).err().map(|e| e.kind);
+    fn a_database_from_a_newer_version_is_refused() -> Result<()> {
+        let conn = open_in_memory(Schema::Data)?;
+        conn.pragma_update(None, "user_version", Schema::Data.version() + 1)?;
+        let error = migrate(&conn, Schema::Data).err().map(|e| e.kind);
         assert_eq!(error, Some(Kind::Incompatible));
+        Ok(())
+    }
+
+    #[test]
+    fn a_backup_restores_and_keeps_the_previous_file() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "eon-office-db-{}-{}",
+            std::process::id(),
+            crate::util::now_ms()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let live = dir.join("data.sqlite");
+        let conn = open(&live, Schema::Data)?;
+        conn.execute("INSERT INTO meta (key, value) VALUES ('k', 'before')", [])?;
+        backup(&conn, &dir.join("copy.sqlite"), Schema::Data)?;
+        assert!(backup(&conn, &dir.join("copy.sqlite"), Schema::Data).is_err());
+        conn.execute("UPDATE meta SET value = 'after' WHERE key = 'k'", [])?;
+        drop(conn);
+        assert!(check(&dir.join("copy.sqlite"), Schema::Data).is_ok());
+        let kept = restore(&live, &dir.join("copy.sqlite"), Schema::Data, 7)?;
+        assert!(kept.is_some_and(|k| k.is_file()));
+        let back = open(&live, Schema::Data)?;
+        let value: String =
+            back.query_row("SELECT value FROM meta WHERE key = 'k'", [], |r| r.get(0))?;
+        assert_eq!(value, "before");
+        drop(back);
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 }

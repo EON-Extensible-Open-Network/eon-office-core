@@ -26,8 +26,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
-      # tests/protocol.rs starts the real binary and speaks the protocol over a
-      # socket, without the SDK: the wire format is the contract.
+      # tests/library.rs uses the library the way applications do, including
+      # two writers on one shared file.
       - run: cargo test
 
   spec:
@@ -65,13 +65,16 @@ jobs:
             echo "::error::the core never takes a GUI dependency"
             exit 1
           fi
-      - name: Loopback only (madde 30)
-        # The only listening address the core accepts is loopback; serving a
-        # network is eon-office-server's job, behind madde 30's gate.
+      - name: A library, not a service
+        # The core is code applications link (plan v0.8, madde 43). A binary
+        # target or a listening socket would bring the service back.
         run: |
-          grep -q 'is_loopback()' src/server.rs || { echo "::error::loopback check removed"; exit 1; }
-          if grep -rnE '0\.0\.0\.0|\[::\]' src; then
-            echo "::error::a wildcard listening address appeared"
+          if grep -nE '^\[\[bin\]\]' Cargo.toml || [ -e src/main.rs ]; then
+            echo "::error::eon-office-core has no binary target"
+            exit 1
+          fi
+          if grep -rnE 'TcpListener|UdpSocket|UnixListener' src; then
+            echo "::error::eon-office-core does not listen on anything"
             exit 1
           fi
 

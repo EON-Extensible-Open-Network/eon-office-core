@@ -300,7 +300,7 @@ pub fn themes(conn: &Connection) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::{open_in_memory, Schema};
 
     fn theme(text: &str) -> Value {
         json!({ "id": "paper", "name": "Paper", "colors": {
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn a_theme_below_aa_is_refused_with_its_ratios() -> Result<()> {
-        let conn = open_in_memory()?;
+        let conn = open_in_memory(Schema::Shared)?;
         assert!(put_theme(&conn, &theme("#111111")).is_ok());
         let error = put_theme(&conn, &theme("#bbbbbb")).err();
         let detail = error.and_then(|e| e.detail).unwrap_or_default();
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn preferences_are_validated_and_fall_back_to_defaults() -> Result<()> {
-        let conn = open_in_memory()?;
+        let conn = open_in_memory(Schema::Shared)?;
         assert_eq!(prefs(&conn)?["font_scale"], 1.0);
         set_pref(&conn, "locale", &json!("tr"))?;
         set_pref(&conn, "reduce_motion", &json!(true))?;

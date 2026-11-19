@@ -5,71 +5,51 @@ SPDX-FileCopyrightText: 2026 EON contributors
 
 # eon-office-core
 
-**EON Office's shared foundation.** A small local service that every EON Office application
-connects to, so that EON Notes, EON Writer, EON Tasks and anything a third party writes can
-share one identity, one notification list, one search, one set of preferences and one
-permission system, without depending on each other's code.
+**The kernel of EON Office's code.** A Rust library every EON Office application links —
+EON Notes, EON Tasks, EON Contacts, EON Calendar — the way every EON Stream build links
+[`eon-stream-core`](https://github.com/EON-Extensible-Open-Network/eon-stream-core). It is not
+a program: nothing runs in the background, nothing has to be started first.
 
-It is not an application: it has no window and never will. It is not a monolith either.
-Each application is its own program in its own repository, and it talks to the core over a
-small, documented, versioned protocol:
-[`eon-office-spec/docs/protocol.md`](https://github.com/EON-Extensible-Open-Network/eon-office-spec/blob/main/docs/protocol.md).
+Each application stands on its own. Download EON Notes, run it, done. When other EON Office
+applications are installed too, they find each other through a few files in one well-known
+folder, described in
+[`eon-office-spec/docs/shared-store.md`](https://github.com/EON-Extensible-Open-Network/eon-office-spec/blob/main/docs/shared-store.md).
 
-> **Status: `0.1.0`, protocol `v0`, unstable.** Every EON contract starts at `v0`, and `v0`
-> may break without a migration path until `v1` (plan, "Kapsam notu"). Build on it to learn,
-> not to ship. The decision to start EON Office at all is
-> [madde 43](https://github.com/EON-Extensible-Open-Network/eon-docs/blob/main/plan/eon-plan.md)
-> of the project plan, with what it costs.
+> **Status: `0.2.0`, formats `v0`, unstable.** `0.1.0` was a local service every application
+> connected to; the owner rejected that design, and
+> [`eon-docs/office/design/2026-11-19-library-core.md`](https://github.com/EON-Extensible-Open-Network/eon-docs/blob/main/office/design/2026-11-19-library-core.md)
+> records the four approaches compared and what the change costs. The decision to build EON
+> Office at all is [madde 43](https://github.com/EON-Extensible-Open-Network/eon-docs/blob/main/plan/eon-plan.md).
 
-## What it does
+## Use it
+
+```rust
+use eon_office_core::{manifest::Manifest, Home};
+
+let home = Home::open(&Home::default_location().unwrap())?;
+let mut app = home.app(&Manifest::from_json(manifest_json)?, Some(exe_folder))?;
+app.put("notes", "n1", &serde_json::json!({ "title": "Merhaba" }), Some(0))?;
+app.index("n1", "Merhaba", "…", false)?;          // into the shared search, private
+app.activity("n1", "Merhaba", "created")?;        // the person's "recent" list
+```
 
 | | |
 |---|---|
-| **Applications** | Install, upgrade (never downgrade), uninstall. Launch, stop, and supervise: a crashing application is restarted up to three times a minute and then left alone. |
-| **Capabilities** | An application asks in its manifest; the owner grants, one by one, and can revoke at any time. Checked on every call against the registry as it is *now*. |
-| **Identity and directory** | The owner; people; organisations, workspaces and teams; roles held *in a scope* (guest, member, admin, owner), reaching downwards; one `access.check` every application uses. |
-| **Storage** | Each application's own JSON document store, with revisions that refuse a stale write. |
-| **Sync** | Offline-first. Export changes after a hybrid-logical-clock stamp; import them elsewhere; the later edit wins and the losing one is **kept**, not discarded. Transport-free: a file, a USB stick or a server can carry it. |
-| **Events** | Applications publish the events their manifest declares; others subscribe if granted. A slow subscriber loses its own events, never blocks anyone. |
-| **Calls** | An application calls methods another application *provides*, through the core. If the provider is not running, or dies mid-call, the caller gets `app_unavailable` at once. |
-| **Notifications** | One list for the suite, rate-limited per application. |
-| **Search** | One index. Turkish-aware folding (`İ ı I i`, madde 40). An application sees its own entries and what others chose to share. |
-| **Jobs** | Wake-ups at a time or every so often. Missed runs coalesce into one. |
-| **Settings, preferences, themes** | Per-application settings; the person's language, theme, motion, text size and contrast, pushed to every application on change; declarative themes refused below WCAG AA. |
-| **Audit** | An append-only hash chain of every change of authority and every refusal — and never of what anyone read or wrote. |
-| **Backup and restore** | Online backup while running; restore that keeps the previous database beside the new one; migrations that refuse a database from a newer core. |
+| **Home** | `EON_OFFICE_HOME`, else `%LOCALAPPDATA%\EON\Office`, `~/Library/Application Support/EON Office`, `$XDG_DATA_HOME/eon-office`. `shared.sqlite` and `apps/<id>/data.sqlite` live there. |
+| **Registration** | `Home::app` registers the application (manifest, folder) so the hub and links can find it. An older copy never downgrades the registry. |
+| **Storage** | The application's own JSON documents, revisions that refuse a stale write. |
+| **Sync** | Offline-first. Export changes after a hybrid-logical-clock stamp, import them on another device; the later edit wins and the losing one is **kept**. Transport-free. |
+| **Search** | One shared index with Turkish-aware folding (`İ ı I i`, madde 40). An application sees its own entries and what others shared; the person's hub sees all. |
+| **Activity** | Ids and titles for a "recent" list across applications — never contents. The last 500 are kept. |
+| **Published data** | Summaries one application offers others (Contacts: names and addresses). Reading needs `call:<that app>`. |
+| **Links** | `eon-office://<app>/<item>`: `links::open` starts the registered application with the link. |
+| **Preferences, themes** | The person's language, theme, motion, text size, contrast; a version number applications poll to notice a change; themes refused below WCAG AA. |
+| **Capabilities** | Declared in the manifest, revocable by the person, checked by the library. Transparency and a guard against mistakes — see `SECURITY.md` for what they are not. |
+| **Audit** | A hash chain of registrations and capability changes. |
+| **Backup** | Online backup of either file; restore that keeps the previous file beside it. |
 
-What it deliberately does **not** do, and why, is in [`docs/architecture.md`](docs/architecture.md).
-
-## Run it
-
-```
-cargo run --release -- serve
-```
-
-It listens on a free loopback port and writes `runtime/endpoint.json` into its home
-directory: `EON_OFFICE_HOME`, else `%LOCALAPPDATA%\EON\Office` on Windows,
-`~/Library/Application Support/EON Office` on macOS, `$XDG_DATA_HOME/eon-office` elsewhere.
-An application finds the core there. The owner's token is `runtime/owner.token`; each
-installed application's token is `apps/<id>/token`.
-
-```
-eon-office-core serve   [--home DIR] [--listen 127.0.0.1:0]
-eon-office-core backup  --out FILE [--home DIR]
-eon-office-core restore --from FILE [--home DIR]     # the core must be stopped
-eon-office-core verify-audit [--home DIR]
-eon-office-core home | version
-```
-
-It refuses to listen anywhere but loopback. A network service for many people is a
-different program with different obligations (madde 30), and will be `eon-office-server`.
-
-## Write an application for it
-
-Use [`eon-office-sdk`](https://github.com/EON-Extensible-Open-Network/eon-office-sdk) (MIT),
-whose `hello` example is the reference integration. Or speak the protocol directly: it is
-JSON-RPC 2.0, one object per line, over TCP — this repository's integration tests do exactly
-that with nothing but a socket.
+Notifications are the operating system's, and reminders are each application's own; the
+library has nothing to add there.
 
 ## Develop
 
@@ -78,17 +58,18 @@ Toolchain pinned in `rust-toolchain.toml`.
 ```
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
-cargo test            # unit tests, then tests/protocol.rs against the real binary
-cargo deny check      # licences and advisories; runs in CI
+cargo test                                    # unit tests and tests/library.rs
+EON_OFFICE_SPEC_DIR=../eon-office-spec cargo test --test spec_examples -- --ignored
+cargo deny check                              # licences and advisories; runs in CI
 ```
 
-`unwrap`, `expect` and `panic!` are denied: the core is shared by every application on the
-machine, and a panic in it is all of them losing their storage at once.
+`unwrap`, `expect` and `panic!` are denied: this code runs inside every application, and a
+panic in it is that application losing the person's work.
 
 ## Licence
 
-`GPL-3.0-or-later` with the [EON Module ABI Exception](LICENSE-EXCEPTION.md). Applications
-that only talk to the core over the published protocol are separate programs and may be
-licensed however their authors choose; the exception is there for the day modules run
-inside the core, and is granted now because the DCO makes adding it later impossible.
-Contributions: [`CONTRIBUTING.md`](CONTRIBUTING.md). Security: [`SECURITY.md`](SECURITY.md).
+`GPL-3.0-or-later` with the [EON Module ABI Exception](LICENSE-EXCEPTION.md). Linking a GPL
+library makes the application GPL too; a third party who wants otherwise can implement the
+spec'd file formats themselves. Whether this library should carry a weaker copyleft is open
+under madde 33. Contributions: [`CONTRIBUTING.md`](CONTRIBUTING.md). Security:
+[`SECURITY.md`](SECURITY.md).

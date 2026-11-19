@@ -5,112 +5,100 @@ SPDX-FileCopyrightText: 2026 EON contributors
 
 # eon-office-core — architecture
 
-The contract is `eon-office-spec`: the protocol, the manifest schema, the capability list.
-This document is about *how this implementation keeps that contract*, and the decisions a
-reader of the code would otherwise have to reverse-engineer.
+The contract is `eon-office-spec`: the shared-store layout, the manifest schema, the
+capability list, the link format. This document is about *how this implementation keeps
+that contract*, and the decisions a reader of the code would otherwise reverse-engineer.
 
 ## Shape
 
 ```
-  EON Notes        EON Tasks        a third party's app        the owner's shell
-     │ (process)       │ (process)          │ (process)               │
-     └──────────── TCP loopback, JSON-RPC 2.0, one object per line ───┘
-                                   │
-                          ┌────────┴────────┐
-                          │ eon-office-core │  one process per person per machine
-                          │                 │
-                          │ server  ── sessions, method table, events, calls,
-                          │            supervisor, job ticker
-                          │ apps · directory · storage · search · notify ·
-                          │ schedule · settings · audit · db · hlc · text
-                          └────────┬────────┘
-                                   │
-                            core.sqlite (WAL)
+  EON Notes (process)     EON Tasks (process)     EON Launcher (optional hub)
+  └ eon-office-core       └ eon-office-core       └ eon-office-core
+        │      │                 │      │                  │
+        │      └──── <home>/shared.sqlite ────────────────┘
+        │                        │        registry · prefs · themes · search ·
+        │                        │        activity · public · audit
+  apps/org.eon.office.notes/     apps/org.eon.office.tasks/
+        data.sqlite                    data.sqlite
 ```
+
+No process is required to be running for any other to work. An application that finds
+nothing else installed still has everything it needs.
 
 ## Decisions
 
-**A service, not a library.** EON Stream's core is a library linked into one program. EON
-Office's foundation is shared by many programs at once, and *a failure in one application
-must not bring down the ecosystem*. Linking a shared core into every application would put
-every application's memory in the same blast radius as the data. A separate process with a
-socket is the cheapest boundary that actually holds: a crashed application closes a
-connection, nothing more.
+**A library, not a service.** `0.1.0` was a service every application connected to over
+loopback JSON-RPC, with tokens and a supervisor. Even Notes could not start without it.
+That is the model of KDE Akonadi and GNOME Evolution Data Server, and it carries their
+cost: a daemon's lifecycle, its versioning against every client, and one more thing that
+can be broken when a person just wants to write a note. The one thing it bought — a
+central permission check — was never a boundary against a same-user program reading the
+database file, which `0.1.0`'s own `SECURITY.md` conceded. The design note in `eon-docs`
+compares four approaches; this one matches EON Stream.
 
-**Loopback TCP rather than named pipes / Unix sockets.** One code path on Windows, macOS and
-Linux in the standard library, no dependency. The cost is that any local process can open
-the port; authentication is therefore by token (below), and the threat model is honest
-about what that buys.
+**Two files, not one.** An application's documents are its own file: a corrupted or
+locked document store affects one application, a backup of one application is one file,
+and removing an application is removing a folder. What applications genuinely share — the
+registry, preferences, the search index, recent activity, published summaries, the audit
+chain — is one small file every application opens.
 
-**Threads, not async.** Two threads per connection (reader, writer) and a handful of
-service threads. The core serves one person's applications, not ten thousand clients; a
-runtime would be a large dependency for no measured benefit. `MAX_SESSIONS` caps it.
+**SQLite between processes.** WAL mode lets readers and a writer proceed together; a
+5-second busy timeout makes writers wait for each other instead of failing. The trap is a
+*deferred* transaction that reads and then writes: when another process wrote in between,
+SQLite cannot upgrade it and fails at once, whatever the timeout. Every read-then-write on
+the shared file therefore uses `db::immediate`. `tests/library.rs` runs two writers against
+one file; switching registration back to a deferred transaction fails it every time.
 
-**One SQLite file, one connection behind a mutex.** Every write is small. Serialising
-through one connection removes a class of locking bugs, and WAL lets `backup` and
-`verify-audit` read concurrently from a second connection.
+**Migrations under the write lock.** Two applications starting at the same moment both see
+an old schema; the first to take the lock migrates, the second re-reads the version inside
+the lock and finds the work done.
 
-**Authority is read fresh on every call.** `Ctx::require` loads the application's grants
-from the database each time. Revocation is therefore immediate, at the price of one
-indexed read per call — well below what the socket costs.
-
-**Bounded queues everywhere a peer is involved.** Each connection's outgoing queue holds
-1,024 messages. Events and jobs use `try_send`: if an application stops reading, *it*
-loses events (counted in `dropped`), and the publisher never waits.
-
-**Calls run on their own thread.** `apps.call` waits for the provider on a fresh thread so
-the caller's connection keeps reading. Two applications calling each other therefore
-cannot deadlock, and an `invoke` arriving at an application that is itself waiting on a
-call is delivered.
-
-**Process supervision by polling `try_wait`.** The supervisor needs to be able to kill a
-child it is also waiting on; `std::process::Child::wait` consumes the handle, so a 100 ms
-`try_wait` loop under a mutex is the std-only way to do both. Restart policy: `never`
-(default) or `on-failure`, at most three restarts in sixty seconds with 1 s / 2 s / 4 s
-back-off, then `failed`.
+**A newer shared file does not stop an application.** If `shared.sqlite` was written by a
+newer EON Office, the application still opens and keeps working with its own documents;
+search, activity and preferences answer `incompatible`. A person's notes are never held
+hostage by a version mismatch in a shared feature.
 
 **Hybrid logical clocks for sync, last-writer-wins at document granularity, losers kept.**
-Field-level CRDT merging would be better for some applications and wrong for others (a
-spreadsheet cell is not a paragraph). The core does the part every application needs —
-a total order everyone agrees on and no silent loss — and leaves semantic merging to the
-application, which gets the losing version from `storage.conflicts`.
+Field-level merging would be right for some applications and wrong for others (a
+spreadsheet cell is not a paragraph). The library does what every application needs — a
+total order everyone agrees on and no silent loss — and leaves semantic merging to the
+application, which gets the losing version from `conflicts`.
 
-## What the core does not do, on purpose
+**Capabilities are checked, and described honestly.** Each call that touches something
+shared checks the manifest's declaration minus the person's revocations, read fresh from
+the registry so a revocation applies at once. It stops a buggy application and makes every
+application's reach visible before it is installed. It does not stop code that opens the
+file itself; nothing in a same-user desktop process could.
+
+**Links start programs, nothing more.** `links::open` looks up the registered folder,
+starts the program with the link as its only argument, and returns. An application that
+is already open receives it through its own single-instance handling.
+
+## What the library does not do, on purpose
 
 | Not here | Where it belongs |
 |---|---|
-| Anything about notes, cells, mail, events, tasks | The application (madde 43c) |
-| Listening on a network interface; serving many people | `eon-office-server`, behind madde 30's gate |
+| Anything about notes, tasks, contacts, events | The application (madde 43c) |
+| Notifications | The operating system's notification centre, through the application |
+| Reminders and timers | The application, while it runs; it catches up at start |
+| Serving many people over a network | `eon-office-server`, behind madde 30's gate |
 | Running application code (plugins, scripts) | Not before madde 4's sandbox design exists |
-| Encrypting the database itself | The operating system's disk encryption, for now — see `SECURITY.md` |
+| Encrypting the files | `docs/encryption-at-rest.md`; the OS's disk encryption for now |
 | Telemetry of any kind | Nowhere (madde 36) |
-| A user interface | Applications; the core never takes a GUI dependency |
-
-## Data layout
-
-```
-<home>/
-  core.sqlite            all state (schema in src/db.rs, version in PRAGMA user_version)
-  runtime/endpoint.json  address, pid, api, version, node -- present while running
-  runtime/owner.token    the owner's token (0600 on Unix)
-  apps/<id>/token        each application's token, written on first install
-```
+| A user interface | Applications; the library never takes a GUI dependency |
 
 ## Error handling
 
-Every failure is an `Error { kind, message, detail }`. `kind` maps to a JSON-RPC number and a
-stable string code (`forbidden`, `conflict`, `app_unavailable`…). Database and I/O errors
-are logged to stderr with their detail and reported to the application only as `internal`,
-because their text can name other applications' data.
+Every failure is an `Error { kind, message, detail }` with a stable string code
+(`forbidden`, `conflict`, `incompatible`…). Database and I/O errors are reported as
+`internal` without their text, because it can name tables and values.
 
-`clippy::unwrap_used`, `expect_used` and `panic` are denied. Mutex poisoning is tolerated
-(`lock()`), so a panic in one connection's thread — which the lints make unlikely —
-does not wedge every other connection.
+`clippy::unwrap_used`, `expect_used` and `panic` are denied.
 
 ## Versioning
 
-- **Protocol** (`api`): an integer, `0` today. A client may send `api` in `session.hello`;
-  a mismatch is `incompatible`. Manifests state `api.min..=api.max`.
-- **Manifest format** (`manifest`): `0`.
-- **Database schema**: ordered migrations; a newer database is refused.
-- **This crate**: semver, `0.x` while the protocol is `v0`.
+- **Manifest format** (`manifest`): `0`. The `api` range is kept for the format and means
+  the shared-store version.
+- **Schemas**: `shared.sqlite` and `data.sqlite` each have ordered migrations; a newer file
+  is refused.
+- **This crate**: semver, `0.x` while the formats are `v0`.

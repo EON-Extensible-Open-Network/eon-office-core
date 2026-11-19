@@ -5,7 +5,33 @@ SPDX-FileCopyrightText: 2026 EON contributors
 
 # Changelog
 
-## Unreleased
+## 0.2.0 — a library, not a service
+
+**Breaking.** `eon-office-core` is now a library every EON Office application links, as
+EON Stream links `eon-stream-core`. There is no binary, no socket, no token and no
+supervisor; each application runs on its own. The reasons and what it costs:
+`eon-docs/office/design/2026-11-19-library-core.md`.
+
+- **Files:** `<home>/shared.sqlite` (registry, preferences, themes, search, activity,
+  published data, audit) and `<home>/apps/<id>/data.sqlite` (one application's
+  documents), each with its own migrations (`db::Schema`).
+- **API:** `Home::open`, `Home::app(manifest, folder)` → `AppContext` (documents, sync,
+  search, activity, publish/read summaries, settings, preferences); `Home::shared()` →
+  `Shared` (the person's hub: applications, revoke/grant, preferences, recent, search
+  over everything, audit); `links::parse` / `links::open`.
+- **Concurrency:** every read-then-write on the shared file takes the write lock first
+  (`db::immediate`); migrations happen under it.
+- **Kept:** storage with revisions, HLC sync with kept losers, Turkish-aware search,
+  WCAG-checked themes, the audit chain, the directory, online backup and restore.
+- **Removed:** the protocol server, application tokens, the supervisor, the in-core
+  notification list (use the operating system's), the job scheduler (applications time
+  their own reminders), events and calls between applications (links and published
+  summaries instead).
+- Tests: unit tests plus `tests/library.rs` — isolation, capabilities, two concurrent
+  writers, activity, published data, a newer shared schema, links, preferences, two-device
+  sync.
+
+## 0.1.1 (unreleased, folded into 0.2.0)
 
 - A relative `entry.command` is found in the install folder with or without the
   platform's executable suffix, so one manifest serves every platform.

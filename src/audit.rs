@@ -47,7 +47,7 @@ pub fn record(
     target: &str,
     detail: &Value,
 ) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
+    let tx = crate::db::immediate(conn)?;
     let last: Option<(i64, String)> = tx
         .query_row(
             "SELECT seq, hash FROM audit ORDER BY seq DESC LIMIT 1",
@@ -128,11 +128,11 @@ pub fn verify(conn: &Connection) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_in_memory;
+    use crate::db::{open_in_memory, Schema};
 
     #[test]
     fn an_edited_entry_breaks_the_chain_where_it_was_edited() -> Result<()> {
-        let conn = open_in_memory()?;
+        let conn = open_in_memory(Schema::Shared)?;
         for n in 0..5 {
             record(&conn, "owner", "test", &format!("t{n}"), &json!({}))?;
         }
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn a_deleted_entry_breaks_the_chain_too() -> Result<()> {
-        let conn = open_in_memory()?;
+        let conn = open_in_memory(Schema::Shared)?;
         for n in 0..4 {
             record(&conn, "core", "test", &format!("t{n}"), &json!({ "n": n }))?;
         }
