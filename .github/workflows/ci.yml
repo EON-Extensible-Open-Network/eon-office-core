@@ -30,6 +30,24 @@ jobs:
       # socket, without the SDK: the wire format is the contract.
       - run: cargo test
 
+  spec:
+    name: agrees with eon-office-spec
+    # The spec's examples, read through the core's own readers. A schema and an
+    # implementation that disagree make a manifest that validates and is then
+    # refused.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: EON-Extensible-Open-Network/eon-office-spec
+          path: spec
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --test spec_examples -- --ignored
+        env:
+          EON_OFFICE_SPEC_DIR: spec
+
   invariants:
     name: project invariants
     runs-on: ubuntu-latest
