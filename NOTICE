@@ -1,0 +1,16 @@
+EON Office Core
+Copyright (c) 2026 EON contributors
+
+This product is licensed under GPL-3.0-or-later WITH the EON Module ABI
+Exception 1.0 (see LICENSE and LICENSE-EXCEPTION.md).
+
+Third-party components
+----------------------
+Each keeps its own licence. This list names the direct dependencies; the full
+inventory is `cargo deny check licenses`, which CI runs (see deny.toml).
+
+  rusqlite / libsqlite3-sys   MIT          -- the database, SQLite bundled
+  SQLite                      public domain
+  serde / serde_json          MIT OR Apache-2.0
+  sha2                        MIT OR Apache-2.0
+  getrandom                   MIT OR Apache-2.0

@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 EON contributors
+
+[package]
+name = "eon-office-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+license = "GPL-3.0-or-later"
+description = "The local core service of EON Office: app registry and lifecycle, capabilities, directory and access control, storage and sync, events, calls between apps, notifications, search, scheduling, settings, audit and backup."
+repository = "https://github.com/EON-Extensible-Open-Network/eon-office-core"
+publish = false
+
+[lib]
+name = "eon_office_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "eon-office-core"
+path = "src/main.rs"
+
+# Every dependency is a supply-chain commitment (madde 37); each says why it is here.
+# The transport is the standard library's TCP and threads: no HTTP stack, no async
+# runtime. One JSON object per line is all the protocol needs.
+[dependencies]
+# The database: documents, directory, grants, audit, jobs. SQLite compiled in so a
+# build needs no system library; `backup` is SQLite's online backup, used by
+# `backup` while the core keeps running.
+rusqlite = { version = "0.43", features = ["bundled", "backup"] }
+# The protocol is JSON-RPC 2.0, one object per line.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Tokens are stored as SHA-256 hashes, and the audit log is a hash chain.
+sha2 = "0.10"
+# Tokens and node identities come from the operating system's randomness.
+getrandom = "0.2"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# The core is shared by every application on the machine: a panic in it is every
+# application losing its storage at once.
+unwrap_used = "deny"
+panic = "deny"
+expect_used = "deny"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+too_many_lines = "allow"
+needless_pass_by_value = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
