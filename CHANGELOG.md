@@ -5,6 +5,11 @@ SPDX-FileCopyrightText: 2026 EON contributors
 
 # Changelog
 
+## Unreleased
+
+- A relative `entry.command` is found in the install folder with or without the
+  platform's executable suffix, so one manifest serves every platform.
+
 ## 0.1.0 — first version
 
 The first foundation for EON Office (plan, madde 43). Protocol `v0`, unstable.
