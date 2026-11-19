@@ -848,3 +848,41 @@ fn backup_restore_and_a_second_core_refused() {
         .unwrap();
     assert!(verified.status.success());
 }
+
+#[test]
+fn a_relative_entry_command_is_found_in_the_install_folder_without_its_suffix() {
+    // One manifest for every platform: `entry.command` is "tool", the file on
+    // Windows is "tool.exe". The core's own binary stands in for the app.
+    let core = CoreProcess::start();
+    let folder = core.home.join("install").join("tool");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::copy(
+        support::binary(),
+        folder.join(format!("tool{}", std::env::consts::EXE_SUFFIX)),
+    )
+    .unwrap();
+    let mut owner = core.owner();
+    let mut tool = manifest("org.test.tool", &[]);
+    tool["entry"] = json!({ "command": "tool", "args": ["version"] });
+    owner
+        .call(
+            "apps.install",
+            json!({ "manifest": tool, "path": folder, "grant": [] }),
+        )
+        .unwrap();
+    owner
+        .call("apps.launch", json!({ "app": "org.test.tool" }))
+        .unwrap();
+    let mut state = Value::Null;
+    for _ in 0..100 {
+        state = owner
+            .call("apps.status", json!({ "app": "org.test.tool" }))
+            .unwrap()["process"]["state"]
+            .clone();
+        if state == "stopped" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(state, "stopped", "it ran and exited cleanly");
+}

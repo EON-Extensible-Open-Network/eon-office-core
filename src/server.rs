@@ -342,14 +342,7 @@ impl Core {
             .path
             .as_ref()
             .map_or_else(|| self.home.join("apps").join(id), PathBuf::from);
-        let program = {
-            let candidate = workdir.join(&entry.command);
-            if Path::new(&entry.command).is_relative() && candidate.is_file() {
-                candidate
-            } else {
-                PathBuf::from(&entry.command)
-            }
-        };
+        let program = resolve_command(&workdir, &entry.command);
         let child = std::process::Command::new(&program)
             .args(&entry.args)
             .current_dir(&workdir)
@@ -532,6 +525,24 @@ impl Core {
             Err(error) => eprintln!("eon-office-core: job ticker: {error}"),
         }
     }
+}
+
+/// A relative `entry.command` names a file in the install folder, written
+/// without the platform's executable suffix so one manifest serves every
+/// platform (`hello` is `hello.exe` on Windows). Anything else is left to the
+/// operating system's own lookup.
+fn resolve_command(workdir: &Path, command: &str) -> PathBuf {
+    if Path::new(command).is_relative() {
+        let plain = workdir.join(command);
+        if plain.is_file() {
+            return plain;
+        }
+        let suffixed = workdir.join(format!("{command}{}", std::env::consts::EXE_SUFFIX));
+        if suffixed.is_file() {
+            return suffixed;
+        }
+    }
+    PathBuf::from(command)
 }
 
 fn matches_topic(pattern: &str, topic: &str) -> bool {
